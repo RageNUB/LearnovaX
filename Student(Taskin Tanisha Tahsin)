@@ -1,0 +1,1213 @@
+<?php
+// ============================================
+// LearnovaX - Add to Cart
+// student/add_to_cart.php
+// ============================================
+require_once '../config/db.php';
+require_once '../config/auth.php';
+requireRole('student');
+
+$courseId  = isset($_GET['id']) ? (int)$_GET['id'] : 0;
+$studentId = getUserId();
+
+// Validate course exists and is approved
+$stmt = $conn->prepare("SELECT id FROM courses WHERE id = ? AND status = 'approved'");
+$stmt->execute([$courseId]);
+if (!$stmt->fetch()) {
+    setFlash('error', 'Course not found.');
+    header("Location: browse.php"); exit();
+}
+
+// Check already enrolled
+$stmt = $conn->prepare("SELECT id FROM enrollments WHERE student_id=? AND course_id=?");
+$stmt->execute([$studentId, $courseId]);
+if ($stmt->rowCount() > 0) {
+    setFlash('error', 'You are already enrolled in this course.');
+    header("Location: browse.php"); exit();
+}
+
+// Check already in cart
+$stmt = $conn->prepare("SELECT id FROM cart WHERE student_id=? AND course_id=?");
+$stmt->execute([$studentId, $courseId]);
+if ($stmt->rowCount() > 0) {
+    setFlash('error', 'Course is already in your cart.');
+    header("Location: cart.php"); exit();
+}
+
+// Add to cart
+$stmt = $conn->prepare("INSERT INTO cart (student_id, course_id) VALUES (?,?)");
+$stmt->execute([$studentId, $courseId]);
+
+setFlash('success', 'Course added to cart!');
+header("Location: cart.php");
+exit();
+?>
+
+<?php
+// ============================================
+// LearnovaX - Browse Courses
+// student/browse.php
+// ============================================
+require_once '../config/db.php';
+require_once '../config/auth.php';
+requireRole('student');
+
+$studentId = getUserId();
+$flash     = getFlash();
+
+// ── Search & Filter ───────────────────────────
+$search   = sanitize($_GET['search']   ?? '');
+$category = sanitize($_GET['category'] ?? '');
+$level    = sanitize($_GET['level']    ?? '');
+$sort     = sanitize($_GET['sort']     ?? 'newest');
+
+// ── Build Query ───────────────────────────────
+$where  = ["c.status = 'approved'"];
+$params = [];
+
+if (!empty($search)) {
+    $where[]  = "(c.title LIKE ? OR c.description LIKE ?)";
+    $params[] = "%$search%";
+    $params[] = "%$search%";
+}
+if (!empty($category)) {
+    $where[]  = "c.category_id = ?";
+    $params[] = $category;
+}
+if (!empty($level)) {
+    $where[]  = "c.level = ?";
+    $params[] = $level;
+}
+
+$orderBy = match($sort) {
+    'price_low'  => "c.price ASC",
+    'price_high' => "c.price DESC",
+    'popular'    => "enrolled_count DESC",
+    default      => "c.created_at DESC"
+};
+
+$whereStr = implode(' AND ', $where);
+
+$stmt = $conn->prepare("
+    SELECT c.*, u.name AS instructor_name, cat.name AS category_name,
+    (SELECT COUNT(*) FROM enrollments WHERE course_id = c.id) AS enrolled_count,
+    (SELECT COALESCE(AVG(rating),0) FROM reviews WHERE course_id = c.id) AS avg_rating,
+    (SELECT COUNT(*) FROM enrollments WHERE course_id = c.id AND student_id = ?) AS is_enrolled,
+    (SELECT COUNT(*) FROM cart WHERE course_id = c.id AND student_id = ?) AS in_cart
+    FROM courses c
+    JOIN users u ON c.instructor_id = u.id
+    LEFT JOIN categories cat ON c.category_id = cat.id
+    WHERE $whereStr
+    ORDER BY $orderBy
+");
+
+$stmt->execute(array_merge([$studentId, $studentId], $params));
+$courses    = $stmt->fetchAll();
+$categories = $conn->query("SELECT * FROM categories ORDER BY name")->fetchAll();
+?>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Browse Courses – LearnovaX</title>
+    <link rel="stylesheet" href="../assets/css/dashboard.css">
+    <link rel="stylesheet" href="../assets/css/browse.css">
+</head>
+<body>
+<div class="layout">
+    <aside class="sidebar">
+        <div class="sidebar-logo">
+            <span class="logo-learn">Learnova</span><span class="logo-x">X</span>
+        </div>
+        <nav class="sidebar-nav">
+            <a href="dashboard.php"  class="nav-item">📊 Dashboard</a>
+            <a href="browse.php"     class="nav-item active">🔍 Browse Courses</a>
+            <a href="my_courses.php" class="nav-item">📚 My Courses</a>
+            <a href="cart.php"       class="nav-item">🛒 Cart</a>
+            <a href="orders.php"     class="nav-item">📋 Order History</a>
+            <a href="profile.php"    class="nav-item">👤 Profile</a>
+        </nav>
+        <div class="sidebar-footer">
+            <a href="../auth/logout.php" class="btn-logout">🚪 Logout</a>
+        </div>
+    </aside>
+
+    <main class="main-content">
+        <div class="topbar">
+            <h1 class="page-title">🔍 Browse Courses</h1>
+            <div class="user-info">👤 <strong><?php echo getUserName(); ?></strong></div>
+        </div>
+
+        <?php if ($flash): ?>
+            <div class="alert alert-<?php echo $flash['type']; ?>"><?php echo $flash['message']; ?></div>
+        <?php endif; ?>
+
+        <!-- Search & Filter Bar -->
+        <form method="GET" action="browse.php" class="filter-bar">
+            <input type="text" name="search" placeholder="Search courses..."
+                   value="<?php echo $search; ?>" class="search-input">
+
+            <select name="category">
+                <option value="">All Categories</option>
+                <?php foreach ($categories as $cat): ?>
+                    <option value="<?php echo $cat['id']; ?>"
+                        <?php echo $category == $cat['id'] ? 'selected' : ''; ?>>
+                        <?php echo htmlspecialchars($cat['name']); ?>
+                    </option>
+                <?php endforeach; ?>
+            </select>
+
+            <select name="level">
+                <option value="">All Levels</option>
+                <option value="beginner"     <?php echo $level === 'beginner'     ? 'selected' : ''; ?>>Beginner</option>
+                <option value="intermediate" <?php echo $level === 'intermediate' ? 'selected' : ''; ?>>Intermediate</option>
+                <option value="advanced"     <?php echo $level === 'advanced'     ? 'selected' : ''; ?>>Advanced</option>
+            </select>
+
+            <select name="sort">
+                <option value="newest"     <?php echo $sort === 'newest'     ? 'selected' : ''; ?>>Newest</option>
+                <option value="popular"    <?php echo $sort === 'popular'    ? 'selected' : ''; ?>>Most Popular</option>
+                <option value="price_low"  <?php echo $sort === 'price_low'  ? 'selected' : ''; ?>>Price: Low to High</option>
+                <option value="price_high" <?php echo $sort === 'price_high' ? 'selected' : ''; ?>>Price: High to Low</option>
+            </select>
+
+            <button type="submit" class="btn-primary">Filter</button>
+            <?php if ($search || $category || $level || $sort !== 'newest'): ?>
+                <a href="browse.php" class="btn-secondary">Clear</a>
+            <?php endif; ?>
+        </form>
+
+        <!-- Results Count -->
+        <p class="results-count">
+            Showing <strong><?php echo count($courses); ?></strong> course<?php echo count($courses) !== 1 ? 's' : ''; ?>
+            <?php if ($search): ?> for "<strong><?php echo htmlspecialchars($search); ?></strong>"<?php endif; ?>
+        </p>
+
+        <!-- Course Grid -->
+        <?php if (empty($courses)): ?>
+            <div class="empty-state">
+                <p>😕 No courses found. Try different filters.</p>
+                <a href="browse.php" class="btn-primary">View All Courses</a>
+            </div>
+        <?php else: ?>
+        <div class="browse-grid">
+            <?php foreach ($courses as $c): ?>
+            <div class="browse-card">
+                <a href="course_detail.php?id=<?php echo $c['id']; ?>" class="card-thumb-link">
+                    <img src="../assets/uploads/<?php echo htmlspecialchars($c['thumbnail']); ?>"
+                         onerror="this.src='../assets/uploads/default_course.png'"
+                         alt="<?php echo htmlspecialchars($c['title']); ?>"
+                         class="card-thumb">
+                </a>
+
+                <div class="card-body">
+                    <div class="card-meta">
+                        <span class="card-category"><?php echo htmlspecialchars($c['category_name'] ?? 'General'); ?></span>
+                        <span class="card-level level-<?php echo $c['level']; ?>"><?php echo ucfirst($c['level']); ?></span>
+                    </div>
+
+                    <a href="course_detail.php?id=<?php echo $c['id']; ?>" class="card-title">
+                        <?php echo htmlspecialchars($c['title']); ?>
+                    </a>
+
+                    <p class="card-instructor">by <?php echo htmlspecialchars($c['instructor_name']); ?></p>
+
+                    <div class="card-stats">
+                        <span>⭐ <?php echo $c['avg_rating'] > 0 ? number_format($c['avg_rating'], 1) : 'New'; ?></span>
+                        <span>👥 <?php echo $c['enrolled_count']; ?> students</span>
+                    </div>
+
+                    <div class="card-footer">
+                        <span class="card-price">
+                            <?php echo $c['price'] > 0 ? '$' . number_format($c['price'], 2) : '<span class="free-badge">FREE</span>'; ?>
+                        </span>
+
+                        <?php if ($c['is_enrolled']): ?>
+                            <span class="btn-enrolled">✅ Enrolled</span>
+                        <?php elseif ($c['in_cart']): ?>
+                            <a href="cart.php" class="btn-in-cart">🛒 In Cart</a>
+                        <?php else: ?>
+                            <a href="add_to_cart.php?id=<?php echo $c['id']; ?>" class="btn-add-cart">Add to Cart</a>
+                        <?php endif; ?>
+                    </div>
+                </div>
+            </div>
+            <?php endforeach; ?>
+        </div>
+        <?php endif; ?>
+
+    </main>
+</div>
+</body>
+</html>
+
+<?php
+// ============================================
+// LearnovaX - Shopping Cart
+// student/cart.php
+// ============================================
+require_once '../config/db.php';
+require_once '../config/auth.php';
+requireRole('student');
+
+$studentId = getUserId();
+$flash     = getFlash();
+
+// ── Remove from cart ──────────────────────────
+if (isset($_GET['remove'])) {
+    $id = (int)$_GET['remove'];
+    $conn->prepare("DELETE FROM cart WHERE id=? AND student_id=?")->execute([$id, $studentId]);
+    setFlash('success', 'Course removed from cart.');
+    header("Location: cart.php"); exit();
+}
+
+// ── Checkout (simulate payment) ───────────────
+if (isset($_POST['checkout'])) {
+    // Get all cart items
+    $stmt = $conn->prepare("SELECT course_id FROM cart WHERE student_id=?");
+    $stmt->execute([$studentId]);
+    $cartItems = $stmt->fetchAll();
+
+    if (empty($cartItems)) {
+        setFlash('error', 'Your cart is empty.');
+        header("Location: cart.php"); exit();
+    }
+
+    // Enroll in each course
+    $enrolled = 0;
+    foreach ($cartItems as $item) {
+        // Skip if already enrolled
+        $check = $conn->prepare("SELECT id FROM enrollments WHERE student_id=? AND course_id=?");
+        $check->execute([$studentId, $item['course_id']]);
+        if ($check->rowCount() === 0) {
+            $conn->prepare("INSERT INTO enrollments (student_id, course_id, payment_status) VALUES (?,?,'paid')")
+                 ->execute([$studentId, $item['course_id']]);
+            $enrolled++;
+        }
+    }
+
+    // Clear cart
+    $conn->prepare("DELETE FROM cart WHERE student_id=?")->execute([$studentId]);
+
+    setFlash('success', "Payment successful! You are now enrolled in $enrolled course(s).");
+    header("Location: my_courses.php"); exit();
+}
+
+// ── Fetch cart items ──────────────────────────
+$stmt = $conn->prepare("
+    SELECT cart.id AS cart_id, c.id AS course_id, c.title, c.price,
+           c.thumbnail, c.level, u.name AS instructor_name,
+           cat.name AS category_name
+    FROM cart
+    JOIN courses c ON cart.course_id = c.id
+    JOIN users u ON c.instructor_id = u.id
+    LEFT JOIN categories cat ON c.category_id = cat.id
+    WHERE cart.student_id = ?
+    ORDER BY cart.added_at DESC
+");
+$stmt->execute([$studentId]);
+$cartItems = $stmt->fetchAll();
+
+// Calculate total
+$total = array_sum(array_column($cartItems, 'price'));
+?>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cart – LearnovaX</title>
+    <link rel="stylesheet" href="../assets/css/dashboard.css">
+    <link rel="stylesheet" href="../assets/css/browse.css">
+    <link rel="stylesheet" href="../assets/css/cart.css">
+</head>
+<body>
+<div class="layout">
+    <aside class="sidebar">
+        <div class="sidebar-logo">
+            <span class="logo-learn">Learnova</span><span class="logo-x">X</span>
+        </div>
+        <nav class="sidebar-nav">
+            <a href="dashboard.php"  class="nav-item">📊 Dashboard</a>
+            <a href="browse.php"     class="nav-item">🔍 Browse Courses</a>
+            <a href="my_courses.php" class="nav-item">📚 My Courses</a>
+            <a href="cart.php"       class="nav-item active">🛒 Cart</a>
+            <a href="orders.php"     class="nav-item">📋 Order History</a>
+            <a href="profile.php"    class="nav-item">👤 Profile</a>
+        </nav>
+        <div class="sidebar-footer">
+            <a href="../auth/logout.php" class="btn-logout">🚪 Logout</a>
+        </div>
+    </aside>
+
+    <main class="main-content">
+        <div class="topbar">
+            <h1 class="page-title">🛒 Shopping Cart</h1>
+            <div class="user-info">👤 <strong><?php echo getUserName(); ?></strong></div>
+        </div>
+
+        <?php if ($flash): ?>
+            <div class="alert alert-<?php echo $flash['type']; ?>"><?php echo $flash['message']; ?></div>
+        <?php endif; ?>
+
+        <?php if (empty($cartItems)): ?>
+            <div class="empty-state">
+                <div style="font-size:48px;margin-bottom:16px;">🛒</div>
+                <p>Your cart is empty.</p>
+                <a href="browse.php" class="btn-primary">Browse Courses</a>
+            </div>
+        <?php else: ?>
+
+        <div class="cart-layout">
+            <!-- Cart Items -->
+            <div class="cart-items">
+                <?php foreach ($cartItems as $item): ?>
+                <div class="cart-item">
+                    <img src="../assets/uploads/<?php echo htmlspecialchars($item['thumbnail']); ?>"
+                         onerror="this.src='../assets/uploads/default_course.png'"
+                         class="cart-thumb" alt="">
+
+                    <div class="cart-item-info">
+                        <a href="course_detail.php?id=<?php echo $item['course_id']; ?>" class="cart-item-title">
+                            <?php echo htmlspecialchars($item['title']); ?>
+                        </a>
+                        <p class="cart-item-meta">
+                            by <?php echo htmlspecialchars($item['instructor_name']); ?>
+                            &nbsp;·&nbsp; <?php echo ucfirst($item['level']); ?>
+                            &nbsp;·&nbsp; <?php echo htmlspecialchars($item['category_name'] ?? 'General'); ?>
+                        </p>
+                    </div>
+
+                    <div class="cart-item-right">
+                        <span class="cart-item-price">
+                            <?php echo $item['price'] > 0 ? '$' . number_format($item['price'], 2) : 'FREE'; ?>
+                        </span>
+                        <a href="cart.php?remove=<?php echo $item['cart_id']; ?>"
+                           class="cart-remove"
+                           onclick="return confirm('Remove this course from cart?')">✕ Remove</a>
+                    </div>
+                </div>
+                <?php endforeach; ?>
+            </div>
+
+            <!-- Order Summary -->
+            <div class="cart-summary">
+                <h2 class="summary-title">Order Summary</h2>
+
+                <div class="summary-rows">
+                    <div class="summary-row">
+                        <span>Courses (<?php echo count($cartItems); ?>)</span>
+                        <span>$<?php echo number_format($total, 2); ?></span>
+                    </div>
+                    <div class="summary-row total-row">
+                        <span>Total</span>
+                        <span>$<?php echo number_format($total, 2); ?></span>
+                    </div>
+                </div>
+
+                <form method="POST" action="cart.php">
+                    <button type="submit" name="checkout" class="btn-checkout"
+                            onclick="return confirm('Confirm payment of $<?php echo number_format($total, 2); ?>?')">
+                        💳 Confirm & Pay $<?php echo number_format($total, 2); ?>
+                    </button>
+                </form>
+
+                <a href="browse.php" class="btn-secondary" style="display:block;text-align:center;margin-top:12px;">
+                    ← Continue Shopping
+                </a>
+
+                <p class="secure-note">🔒 Secure simulated checkout</p>
+            </div>
+        </div>
+
+        <?php endif; ?>
+    </main>
+</div>
+</body>
+</html>
+
+<?php
+// ============================================
+// LearnovaX - Course Detail
+// student/course_detail.php
+// ============================================
+require_once '../config/db.php';
+require_once '../config/auth.php';
+requireRole('student');
+
+$courseId  = isset($_GET['id']) ? (int)$_GET['id'] : 0;
+$studentId = getUserId();
+$flash     = getFlash();
+
+// Fetch course
+$stmt = $conn->prepare("
+    SELECT c.*, u.name AS instructor_name, u.bio AS instructor_bio,
+           cat.name AS category_name,
+    (SELECT COUNT(*) FROM enrollments WHERE course_id = c.id) AS enrolled_count,
+    (SELECT COALESCE(AVG(rating),0) FROM reviews WHERE course_id = c.id) AS avg_rating,
+    (SELECT COUNT(*) FROM reviews WHERE course_id = c.id) AS review_count,
+    (SELECT COUNT(*) FROM enrollments WHERE course_id = c.id AND student_id = ?) AS is_enrolled,
+    (SELECT COUNT(*) FROM cart WHERE course_id = c.id AND student_id = ?) AS in_cart
+    FROM courses c
+    JOIN users u ON c.instructor_id = u.id
+    LEFT JOIN categories cat ON c.category_id = cat.id
+    WHERE c.id = ? AND c.status = 'approved'
+");
+$stmt->execute([$studentId, $studentId, $courseId]);
+$course = $stmt->fetch();
+
+if (!$course) {
+    setFlash('error', 'Course not found.');
+    header("Location: browse.php"); exit();
+}
+
+// Fetch reviews
+$reviewStmt = $conn->prepare("
+    SELECT r.*, u.name AS student_name
+    FROM reviews r
+    JOIN users u ON r.student_id = u.id
+    WHERE r.course_id = ?
+    ORDER BY r.created_at DESC
+");
+$reviewStmt->execute([$courseId]);
+$reviews = $reviewStmt->fetchAll();
+
+// Check if student already reviewed
+$hasReviewed = $conn->prepare("SELECT id FROM reviews WHERE student_id=? AND course_id=?");
+$hasReviewed->execute([$studentId, $courseId]);
+$alreadyReviewed = $hasReviewed->rowCount() > 0;
+
+// Handle review submission
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['submit_review'])) {
+    if (!$course['is_enrolled']) {
+        setFlash('error', 'You must be enrolled to leave a review.');
+    } elseif ($alreadyReviewed) {
+        setFlash('error', 'You have already reviewed this course.');
+    } else {
+        $rating  = (int)($_POST['rating'] ?? 0);
+        $comment = sanitize($_POST['comment'] ?? '');
+        if ($rating < 1 || $rating > 5) {
+            setFlash('error', 'Please select a rating between 1 and 5.');
+        } else {
+            $stmt = $conn->prepare("INSERT INTO reviews (student_id, course_id, rating, comment) VALUES (?,?,?,?)");
+            $stmt->execute([$studentId, $courseId, $rating, $comment]);
+            setFlash('success', 'Review submitted! Thank you.');
+            header("Location: course_detail.php?id=$courseId"); exit();
+        }
+    }
+}
+?>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title><?php echo htmlspecialchars($course['title']); ?> – LearnovaX</title>
+    <link rel="stylesheet" href="../assets/css/dashboard.css">
+    <link rel="stylesheet" href="../assets/css/browse.css">
+    <link rel="stylesheet" href="../assets/css/course_detail.css">
+</head>
+<body>
+<div class="layout">
+    <aside class="sidebar">
+        <div class="sidebar-logo">
+            <span class="logo-learn">Learnova</span><span class="logo-x">X</span>
+        </div>
+        <nav class="sidebar-nav">
+            <a href="dashboard.php"  class="nav-item">📊 Dashboard</a>
+            <a href="browse.php"     class="nav-item active">🔍 Browse Courses</a>
+            <a href="my_courses.php" class="nav-item">📚 My Courses</a>
+            <a href="cart.php"       class="nav-item">🛒 Cart</a>
+            <a href="orders.php"     class="nav-item">📋 Order History</a>
+            <a href="profile.php"    class="nav-item">👤 Profile</a>
+        </nav>
+        <div class="sidebar-footer">
+            <a href="../auth/logout.php" class="btn-logout">🚪 Logout</a>
+        </div>
+    </aside>
+
+    <main class="main-content">
+        <?php if ($flash): ?>
+            <div class="alert alert-<?php echo $flash['type']; ?>" style="margin-top:20px;">
+                <?php echo $flash['message']; ?>
+            </div>
+        <?php endif; ?>
+
+        <div class="detail-hero">
+            <div class="detail-info">
+                <div class="detail-meta">
+                    <span class="card-category"><?php echo htmlspecialchars($course['category_name'] ?? 'General'); ?></span>
+                    <span class="card-level level-<?php echo $course['level']; ?>"><?php echo ucfirst($course['level']); ?></span>
+                </div>
+                <h1 class="detail-title"><?php echo htmlspecialchars($course['title']); ?></h1>
+                <p class="detail-instructor">By <strong><?php echo htmlspecialchars($course['instructor_name']); ?></strong></p>
+
+                <div class="detail-stats">
+                    <span>⭐ <?php echo $course['avg_rating'] > 0 ? number_format($course['avg_rating'],1) : 'No ratings yet'; ?></span>
+                    <span>👥 <?php echo $course['enrolled_count']; ?> students</span>
+                    <span>💬 <?php echo $course['review_count']; ?> reviews</span>
+                </div>
+            </div>
+
+            <div class="detail-action-card">
+                <img src="../assets/uploads/<?php echo htmlspecialchars($course['thumbnail']); ?>"
+                     onerror="this.src='../assets/uploads/default_course.png'"
+                     class="detail-thumb" alt="">
+
+                <div class="detail-price">
+                    <?php echo $course['price'] > 0 ? '$' . number_format($course['price'], 2) : '<span class="free-badge">FREE</span>'; ?>
+                </div>
+
+                <?php if ($course['is_enrolled']): ?>
+                    <div class="btn-enrolled-full">✅ You are enrolled in this course</div>
+                <?php elseif ($course['in_cart']): ?>
+                    <a href="cart.php" class="btn-primary" style="display:block;text-align:center;">🛒 Go to Cart</a>
+                <?php else: ?>
+                    <a href="add_to_cart.php?id=<?php echo $courseId; ?>"
+                       class="btn-primary" style="display:block;text-align:center;">Add to Cart</a>
+                <?php endif; ?>
+
+                <a href="browse.php" class="btn-secondary" style="display:block;text-align:center;margin-top:10px;">← Back to Browse</a>
+            </div>
+        </div>
+
+        <!-- Description -->
+        <div class="detail-section">
+            <h2>About This Course</h2>
+            <p><?php echo nl2br(htmlspecialchars($course['description'])); ?></p>
+        </div>
+
+        <!-- Instructor -->
+        <div class="detail-section">
+            <h2>About the Instructor</h2>
+            <p><strong><?php echo htmlspecialchars($course['instructor_name']); ?></strong></p>
+            <p><?php echo $course['instructor_bio'] ? nl2br(htmlspecialchars($course['instructor_bio'])) : 'No bio available.'; ?></p>
+        </div>
+
+        <!-- Reviews -->
+        <div class="detail-section">
+            <h2>Student Reviews (<?php echo $course['review_count']; ?>)</h2>
+
+            <!-- Submit Review -->
+            <?php if ($course['is_enrolled'] && !$alreadyReviewed): ?>
+            <div class="review-form-box">
+                <h3>Leave a Review</h3>
+                <form method="POST" action="course_detail.php?id=<?php echo $courseId; ?>">
+                    <div class="star-rating" id="starRating">
+                        <?php for ($i = 5; $i >= 1; $i--): ?>
+                            <input type="radio" id="star<?php echo $i; ?>" name="rating" value="<?php echo $i; ?>">
+                            <label for="star<?php echo $i; ?>">★</label>
+                        <?php endfor; ?>
+                    </div>
+                    <textarea name="comment" placeholder="Share your experience..." rows="4"></textarea>
+                    <button type="submit" name="submit_review" class="btn-primary">Submit Review</button>
+                </form>
+            </div>
+            <?php elseif ($alreadyReviewed): ?>
+                <p class="already-reviewed">✅ You have already reviewed this course.</p>
+            <?php elseif (!$course['is_enrolled']): ?>
+                <p class="enroll-to-review">Enroll in this course to leave a review.</p>
+            <?php endif; ?>
+
+            <!-- Reviews List -->
+            <?php if (empty($reviews)): ?>
+                <p style="color:#6b7280;margin-top:16px;">No reviews yet. Be the first!</p>
+            <?php else: ?>
+                <div class="reviews-list">
+                    <?php foreach ($reviews as $r): ?>
+                    <div class="review-item">
+                        <div class="review-header">
+                            <strong><?php echo htmlspecialchars($r['student_name']); ?></strong>
+                            <span class="review-stars"><?php echo str_repeat('★', $r['rating']) . str_repeat('☆', 5 - $r['rating']); ?></span>
+                            <span class="review-date"><?php echo date('d M Y', strtotime($r['created_at'])); ?></span>
+                        </div>
+                        <?php if ($r['comment']): ?>
+                            <p class="review-comment"><?php echo nl2br(htmlspecialchars($r['comment'])); ?></p>
+                        <?php endif; ?>
+                    </div>
+                    <?php endforeach; ?>
+                </div>
+            <?php endif; ?>
+        </div>
+
+    </main>
+</div>
+</body>
+</html>
+
+<?php
+// ============================================
+// LearnovaX - Student Dashboard
+// student/dashboard.php
+// ============================================
+require_once '../config/db.php';
+require_once '../config/auth.php';
+requireRole('student');
+
+$userId = getUserId();
+$flash  = getFlash();
+
+// ── Fetch enrolled courses ────────────────────
+$stmt = $conn->prepare("
+    SELECT c.*, u.name AS instructor_name, cat.name AS category_name, e.enrolled_at
+    FROM enrollments e
+    JOIN courses c ON e.course_id = c.id
+    JOIN users u ON c.instructor_id = u.id
+    LEFT JOIN categories cat ON c.category_id = cat.id
+    WHERE e.student_id = ?
+    ORDER BY e.enrolled_at DESC
+");
+$stmt->execute([$userId]);
+$enrolledCourses = $stmt->fetchAll();
+
+$totalEnrolled = count($enrolledCourses);
+?>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Student Dashboard – LearnovaX</title>
+    <link rel="stylesheet" href="../assets/css/dashboard.css">
+</head>
+<body>
+
+<div class="layout">
+    <!-- Sidebar -->
+    <aside class="sidebar">
+        <div class="sidebar-logo">
+            <span class="logo-learn">Learnova</span><span class="logo-x">X</span>
+        </div>
+        <nav class="sidebar-nav">
+            <a href="dashboard.php"  class="nav-item active">📊 Dashboard</a>
+            <a href="browse.php"     class="nav-item">🔍 Browse Courses</a>
+            <a href="my_courses.php" class="nav-item">📚 My Courses</a>
+            <a href="cart.php"       class="nav-item">🛒 Cart</a>
+            <a href="orders.php"     class="nav-item">📋 Order History</a>
+            <a href="profile.php"    class="nav-item">👤 Profile</a>
+        </nav>
+        <div class="sidebar-footer">
+            <a href="../auth/logout.php" class="btn-logout">🚪 Logout</a>
+        </div>
+    </aside>
+
+    <!-- Main -->
+    <main class="main-content">
+        <div class="topbar">
+            <h1 class="page-title">My Dashboard</h1>
+            <div class="user-info">👤 Welcome, <strong><?php echo getUserName(); ?></strong></div>
+        </div>
+
+        <!-- Flash -->
+        <?php if ($flash): ?>
+            <div class="alert alert-<?php echo $flash['type']; ?>">
+                <?php echo $flash['message']; ?>
+            </div>
+        <?php endif; ?>
+
+        <!-- Stats -->
+        <div class="stats-grid">
+            <div class="stat-card purple">
+                <div class="stat-icon">📚</div>
+                <div class="stat-info">
+                    <span class="stat-number"><?php echo $totalEnrolled; ?></span>
+                    <span class="stat-label">Enrolled Courses</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Enrolled Courses -->
+        <div class="section-card">
+            <div class="section-header">
+                <h2 class="section-title">📚 My Courses</h2>
+                <a href="browse.php" class="btn-primary">Browse More</a>
+            </div>
+
+            <?php if (empty($enrolledCourses)): ?>
+                <div class="empty-state">
+                    <p>You haven't enrolled in any courses yet.</p>
+                    <a href="browse.php" class="btn-primary">Explore Courses</a>
+                </div>
+            <?php else: ?>
+                <div class="course-grid">
+                    <?php foreach ($enrolledCourses as $c): ?>
+                    <div class="course-card">
+                        <div class="course-thumb">
+                            <img src="../assets/uploads/<?php echo htmlspecialchars($c['thumbnail']); ?>"
+                                 alt="<?php echo htmlspecialchars($c['title']); ?>"
+                                 onerror="this.src='../assets/uploads/default_course.png'">
+                        </div>
+                        <div class="course-info">
+                            <span class="course-category"><?php echo htmlspecialchars($c['category_name'] ?? 'General'); ?></span>
+                            <h3 class="course-title"><?php echo htmlspecialchars($c['title']); ?></h3>
+                            <p class="course-instructor">by <?php echo htmlspecialchars($c['instructor_name']); ?></p>
+                            <p class="course-enrolled-date">Enrolled: <?php echo date('d M Y', strtotime($c['enrolled_at'])); ?></p>
+                        </div>
+                    </div>
+                    <?php endforeach; ?>
+                </div>
+            <?php endif; ?>
+        </div>
+
+    </main>
+</div>
+
+</body>
+</html>
+
+<?php
+// ============================================
+// LearnovaX - Student My Courses
+// student/my_courses.php
+// ============================================
+require_once '../config/db.php';
+require_once '../config/auth.php';
+requireRole('student');
+
+$studentId = getUserId();
+$flash     = getFlash();
+
+$stmt = $conn->prepare("
+    SELECT c.*, u.name AS instructor_name, cat.name AS category_name,
+           e.enrolled_at, e.payment_status,
+    (SELECT COALESCE(AVG(rating),0) FROM reviews WHERE course_id = c.id) AS avg_rating
+    FROM enrollments e
+    JOIN courses c ON e.course_id = c.id
+    JOIN users u ON c.instructor_id = u.id
+    LEFT JOIN categories cat ON c.category_id = cat.id
+    WHERE e.student_id = ?
+    ORDER BY e.enrolled_at DESC
+");
+$stmt->execute([$studentId]);
+$courses = $stmt->fetchAll();
+?>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>My Courses – LearnovaX</title>
+    <link rel="stylesheet" href="../assets/css/dashboard.css">
+    <link rel="stylesheet" href="../assets/css/browse.css">
+</head>
+<body>
+<div class="layout">
+    <aside class="sidebar">
+        <div class="sidebar-logo">
+            <span class="logo-learn">Learnova</span><span class="logo-x">X</span>
+        </div>
+        <nav class="sidebar-nav">
+            <a href="dashboard.php"  class="nav-item">📊 Dashboard</a>
+            <a href="browse.php"     class="nav-item">🔍 Browse Courses</a>
+            <a href="my_courses.php" class="nav-item active">📚 My Courses</a>
+            <a href="cart.php"       class="nav-item">🛒 Cart</a>
+            <a href="orders.php"     class="nav-item">📋 Order History</a>
+            <a href="profile.php"    class="nav-item">👤 Profile</a>
+        </nav>
+        <div class="sidebar-footer">
+            <a href="../auth/logout.php" class="btn-logout">🚪 Logout</a>
+        </div>
+    </aside>
+
+    <main class="main-content">
+        <div class="topbar">
+            <h1 class="page-title">📚 My Courses</h1>
+            <div class="user-info">👤 <strong><?php echo getUserName(); ?></strong></div>
+        </div>
+
+        <?php if ($flash): ?>
+            <div class="alert alert-<?php echo $flash['type']; ?>"><?php echo $flash['message']; ?></div>
+        <?php endif; ?>
+
+        <?php if (empty($courses)): ?>
+            <div class="empty-state">
+                <div style="font-size:48px;margin-bottom:16px;">📚</div>
+                <p>You haven't enrolled in any courses yet.</p>
+                <a href="browse.php" class="btn-primary">Browse Courses</a>
+            </div>
+        <?php else: ?>
+        <div class="browse-grid">
+            <?php foreach ($courses as $c): ?>
+            <div class="browse-card">
+                <a href="course_detail.php?id=<?php echo $c['id']; ?>">
+                    <img src="../assets/uploads/<?php echo htmlspecialchars($c['thumbnail']); ?>"
+                         onerror="this.src='../assets/uploads/default_course.png'"
+                         class="card-thumb" alt="">
+                </a>
+                <div class="card-body">
+                    <div class="card-meta">
+                        <span class="card-category"><?php echo htmlspecialchars($c['category_name'] ?? 'General'); ?></span>
+                        <span class="card-level level-<?php echo $c['level']; ?>"><?php echo ucfirst($c['level']); ?></span>
+                    </div>
+                    <a href="course_detail.php?id=<?php echo $c['id']; ?>" class="card-title">
+                        <?php echo htmlspecialchars($c['title']); ?>
+                    </a>
+                    <p class="card-instructor">by <?php echo htmlspecialchars($c['instructor_name']); ?></p>
+                    <div class="card-stats">
+                        <span>⭐ <?php echo $c['avg_rating'] > 0 ? number_format($c['avg_rating'],1) : 'No ratings'; ?></span>
+                        <span>📅 <?php echo date('d M Y', strtotime($c['enrolled_at'])); ?></span>
+                    </div>
+                    <div class="card-footer">
+                        <span class="badge badge-approved">✅ Enrolled</span>
+                        <a href="course_detail.php?id=<?php echo $c['id']; ?>" class="btn-add-cart">View Course</a>
+                    </div>
+                </div>
+            </div>
+            <?php endforeach; ?>
+        </div>
+        <?php endif; ?>
+    </main>
+</div>
+</body>
+</html>
+
+<?php
+// ============================================
+// LearnovaX - Order History
+// student/orders.php
+// ============================================
+require_once '../config/db.php';
+require_once '../config/auth.php';
+requireRole('student');
+
+$studentId = getUserId();
+
+$stmt = $conn->prepare("
+    SELECT e.*, c.title AS course_title, c.price, c.thumbnail,
+           c.level, u.name AS instructor_name,
+           cat.name AS category_name
+    FROM enrollments e
+    JOIN courses c ON e.course_id = c.id
+    JOIN users u ON c.instructor_id = u.id
+    LEFT JOIN categories cat ON c.category_id = cat.id
+    WHERE e.student_id = ?
+    ORDER BY e.enrolled_at DESC
+");
+$stmt->execute([$studentId]);
+$orders = $stmt->fetchAll();
+
+$totalSpent = array_sum(array_column($orders, 'price'));
+?>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Order History – LearnovaX</title>
+    <link rel="stylesheet" href="../assets/css/dashboard.css">
+</head>
+<body>
+<div class="layout">
+    <aside class="sidebar">
+        <div class="sidebar-logo">
+            <span class="logo-learn">Learnova</span><span class="logo-x">X</span>
+        </div>
+        <nav class="sidebar-nav">
+            <a href="dashboard.php"  class="nav-item">📊 Dashboard</a>
+            <a href="browse.php"     class="nav-item">🔍 Browse Courses</a>
+            <a href="my_courses.php" class="nav-item">📚 My Courses</a>
+            <a href="cart.php"       class="nav-item">🛒 Cart</a>
+            <a href="orders.php"     class="nav-item active">📋 Order History</a>
+            <a href="profile.php"    class="nav-item">👤 Profile</a>
+        </nav>
+        <div class="sidebar-footer">
+            <a href="../auth/logout.php" class="btn-logout">🚪 Logout</a>
+        </div>
+    </aside>
+
+    <main class="main-content">
+        <div class="topbar">
+            <h1 class="page-title">📋 Order History</h1>
+            <div class="user-info">👤 <strong><?php echo getUserName(); ?></strong></div>
+        </div>
+
+        <!-- Summary -->
+        <div class="stats-grid" style="margin-bottom:24px;">
+            <div class="stat-card blue">
+                <div class="stat-icon">📋</div>
+                <div class="stat-info">
+                    <span class="stat-number"><?php echo count($orders); ?></span>
+                    <span class="stat-label">Total Orders</span>
+                </div>
+            </div>
+            <div class="stat-card green">
+                <div class="stat-icon">💰</div>
+                <div class="stat-info">
+                    <span class="stat-number">$<?php echo number_format($totalSpent, 2); ?></span>
+                    <span class="stat-label">Total Spent</span>
+                </div>
+            </div>
+        </div>
+
+        <div class="section-card">
+            <?php if (empty($orders)): ?>
+                <div class="empty-state">
+                    <p>You haven't made any purchases yet.</p>
+                    <a href="browse.php" class="btn-primary">Browse Courses</a>
+                </div>
+            <?php else: ?>
+            <table class="data-table">
+                <thead>
+                    <tr>
+                        <th>#</th>
+                        <th>Course</th>
+                        <th>Instructor</th>
+                        <th>Category</th>
+                        <th>Amount</th>
+                        <th>Status</th>
+                        <th>Date</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <?php foreach ($orders as $i => $o): ?>
+                    <tr>
+                        <td><?php echo $i + 1; ?></td>
+                        <td>
+                            <div style="display:flex;align-items:center;gap:10px;">
+                                <img src="../assets/uploads/<?php echo htmlspecialchars($o['thumbnail']); ?>"
+                                     onerror="this.src='../assets/uploads/default_course.png'"
+                                     style="width:48px;height:32px;object-fit:cover;border-radius:4px;">
+                                <span><?php echo htmlspecialchars($o['course_title']); ?></span>
+                            </div>
+                        </td>
+                        <td><?php echo htmlspecialchars($o['instructor_name']); ?></td>
+                        <td><?php echo htmlspecialchars($o['category_name'] ?? '—'); ?></td>
+                        <td><?php echo $o['price'] > 0 ? '$' . number_format($o['price'], 2) : 'Free'; ?></td>
+                        <td>
+                            <span class="badge <?php echo $o['payment_status'] === 'paid' ? 'badge-approved' : 'badge-pending'; ?>">
+                                <?php echo ucfirst($o['payment_status']); ?>
+                            </span>
+                        </td>
+                        <td><?php echo date('d M Y, h:i A', strtotime($o['enrolled_at'])); ?></td>
+                    </tr>
+                    <?php endforeach; ?>
+                </tbody>
+            </table>
+            <?php endif; ?>
+        </div>
+    </main>
+</div>
+</body>
+</html>
+
+<?php
+// ============================================
+// LearnovaX - Profile Page (Student & Instructor)
+// student/profile.php  OR  instructor/profile.php
+// ============================================
+require_once '../config/db.php';
+require_once '../config/auth.php';
+requireLogin();
+
+$userId = getUserId();
+$role   = getUserRole();
+$flash  = getFlash();
+$errors = [];
+
+// Fetch current user
+$stmt = $conn->prepare("SELECT * FROM users WHERE id = ?");
+$stmt->execute([$userId]);
+$user = $stmt->fetch();
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+
+    $name    = sanitize($_POST['name'] ?? '');
+    $bio     = sanitize($_POST['bio']  ?? '');
+    $newPass = $_POST['new_password']     ?? '';
+    $confirm = $_POST['confirm_password'] ?? '';
+
+    // Validate name
+    if (empty($name))
+        $errors[] = "Name is required.";
+    elseif (!preg_match("/^[a-zA-Z\s]+$/", $name))
+        $errors[] = "Name must contain letters only.";
+
+    // Password change (optional)
+    if (!empty($newPass)) {
+        if (strlen($newPass) < 6)
+            $errors[] = "New password must be at least 6 characters.";
+        elseif ($newPass !== $confirm)
+            $errors[] = "Passwords do not match.";
+    }
+
+    // Handle profile picture upload
+    $pic = $user['profile_pic'];
+    if (isset($_FILES['profile_pic']) && $_FILES['profile_pic']['error'] === 0) {
+        $allowed  = ['image/jpeg', 'image/png', 'image/webp'];
+        $fileType = $_FILES['profile_pic']['type'];
+        $fileSize = $_FILES['profile_pic']['size'];
+
+        if (!in_array($fileType, $allowed)) {
+            $errors[] = "Profile picture must be JPG, PNG or WEBP.";
+        } elseif ($fileSize > 1 * 1024 * 1024) {
+            $errors[] = "Profile picture must be under 1MB.";
+        } else {
+            if ($pic !== 'default.png') {
+                $old = '../assets/uploads/' . $pic;
+                if (file_exists($old)) unlink($old);
+            }
+            $ext = pathinfo($_FILES['profile_pic']['name'], PATHINFO_EXTENSION);
+            $pic = 'user_' . uniqid() . '.' . $ext;
+            move_uploaded_file($_FILES['profile_pic']['tmp_name'], '../assets/uploads/' . $pic);
+        }
+    }
+
+    if (empty($errors)) {
+        if (!empty($newPass)) {
+            $hashed = password_hash($newPass, PASSWORD_DEFAULT);
+            $conn->prepare("UPDATE users SET name=?, bio=?, profile_pic=?, password=? WHERE id=?")
+                 ->execute([$name, $bio, $pic, $hashed, $userId]);
+        } else {
+            $conn->prepare("UPDATE users SET name=?, bio=?, profile_pic=? WHERE id=?")
+                 ->execute([$name, $bio, $pic, $userId]);
+        }
+
+        // Update session name
+        $_SESSION['name'] = $name;
+        $_SESSION['pic']  = $pic;
+
+        setFlash('success', 'Profile updated successfully!');
+        header("Location: profile.php"); exit();
+    }
+}
+
+// Sidebar links based on role
+$navLinks = $role === 'instructor' ? [
+    ['dashboard.php',     '📊 Dashboard'],
+    ['create_course.php', '➕ Create Course'],
+    ['my_courses.php',    '📚 My Courses'],
+    ['enrollments.php',   '👥 Enrollments'],
+    ['profile.php',       '👤 Profile'],
+] : [
+    ['dashboard.php',  '📊 Dashboard'],
+    ['browse.php',     '🔍 Browse Courses'],
+    ['my_courses.php', '📚 My Courses'],
+    ['cart.php',       '🛒 Cart'],
+    ['orders.php',     '📋 Order History'],
+    ['profile.php',    '👤 Profile'],
+];
+?>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Profile – LearnovaX</title>
+    <link rel="stylesheet" href="../assets/css/dashboard.css">
+    <link rel="stylesheet" href="../assets/css/course_form.css">
+    <link rel="stylesheet" href="../assets/css/profile.css">
+</head>
+<body>
+<div class="layout">
+    <aside class="sidebar">
+        <div class="sidebar-logo">
+            <span class="logo-learn">Learnova</span><span class="logo-x">X</span>
+        </div>
+        <nav class="sidebar-nav">
+            <?php foreach ($navLinks as [$href, $label]): ?>
+                <a href="<?php echo $href; ?>"
+                   class="nav-item <?php echo basename($_SERVER['PHP_SELF']) === $href ? 'active' : ''; ?>">
+                   <?php echo $label; ?>
+                </a>
+            <?php endforeach; ?>
+        </nav>
+        <div class="sidebar-footer">
+            <a href="../auth/logout.php" class="btn-logout">🚪 Logout</a>
+        </div>
+    </aside>
+
+    <main class="main-content">
+        <div class="topbar">
+            <h1 class="page-title">👤 My Profile</h1>
+            <div class="user-info">👤 <strong><?php echo getUserName(); ?></strong></div>
+        </div>
+
+        <?php if ($flash): ?>
+            <div class="alert alert-<?php echo $flash['type']; ?>"><?php echo $flash['message']; ?></div>
+        <?php endif; ?>
+
+        <?php if (!empty($errors)): ?>
+            <div class="alert alert-error">
+                <ul><?php foreach ($errors as $e) echo "<li>$e</li>"; ?></ul>
+            </div>
+        <?php endif; ?>
+
+        <div class="profile-layout">
+
+            <!-- Profile Picture Card -->
+            <div class="profile-pic-card">
+                <img src="../assets/uploads/<?php echo htmlspecialchars($user['profile_pic']); ?>"
+                     onerror="this.src='../assets/uploads/default.png'"
+                     class="profile-avatar" id="avatarPreview" alt="Profile">
+                <h3><?php echo htmlspecialchars($user['name']); ?></h3>
+                <span class="badge badge-approved"><?php echo ucfirst($user['role']); ?></span>
+                <p class="profile-email"><?php echo htmlspecialchars($user['email']); ?></p>
+                <p class="profile-joined">Joined <?php echo date('M Y', strtotime($user['created_at'])); ?></p>
+            </div>
+
+            <!-- Edit Form -->
+            <div class="profile-form-card">
+                <h2 class="section-title" style="margin-bottom:20px;">Edit Profile</h2>
+                <form method="POST" action="profile.php" enctype="multipart/form-data">
+
+                    <div class="form-group">
+                        <label>Full Name</label>
+                        <input type="text" name="name" value="<?php echo htmlspecialchars($user['name']); ?>" required>
+                    </div>
+
+                    <div class="form-group">
+                        <label>Email Address</label>
+                        <input type="email" value="<?php echo htmlspecialchars($user['email']); ?>" disabled
+                               style="background:#f3f4f6;cursor:not-allowed;">
+                        <small class="hint">Email cannot be changed.</small>
+                    </div>
+
+                    <div class="form-group">
+                        <label>Bio</label>
+                        <textarea name="bio" rows="3"
+                                  placeholder="Tell us about yourself..."><?php echo htmlspecialchars($user['bio'] ?? ''); ?></textarea>
+                    </div>
+
+                    <div class="form-group">
+                        <label>Profile Picture</label>
+                        <input type="file" name="profile_pic" accept="image/*" id="picInput">
+                        <small class="hint">JPG, PNG or WEBP. Max 1MB.</small>
+                    </div>
+
+                    <hr style="margin:20px 0;border-color:#f0f0f0;">
+                    <h3 style="font-size:15px;margin-bottom:16px;">Change Password <small style="color:#6b7280;font-weight:400;">(leave blank to keep current)</small></h3>
+
+                    <div class="form-group">
+                        <label>New Password</label>
+                        <input type="password" name="new_password" placeholder="Min. 6 characters">
+                    </div>
+
+                    <div class="form-group">
+                        <label>Confirm New Password</label>
+                        <input type="password" name="confirm_password" placeholder="Re-enter new password">
+                    </div>
+
+                    <div class="form-actions">
+                        <button type="submit" class="btn-primary">Save Changes</button>
+                    </div>
+
+                </form>
+            </div>
+        </div>
+    </main>
+</div>
+
+<script>
+// Live avatar preview
+document.getElementById('picInput')?.addEventListener('change', function () {
+    const file = this.files[0];
+    if (file) {
+        const reader = new FileReader();
+        reader.onload = e => document.getElementById('avatarPreview').src = e.target.result;
+        reader.readAsDataURL(file);
+    }
+});
+</script>
+</body>
+</html>
